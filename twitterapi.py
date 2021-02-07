@@ -1,21 +1,20 @@
 import tweepy
-from textblob import TextBlob
 import pandas as pd
 import numpy as np 
 import datetime
 import re # regular expression module 
-from .models import TwitterApiKey
+from database_connection import DatabaseConnection
+import flair 
 
+from textblob import TextBlob
 import nltk
 nltk.download('vader_lexicon')
-
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
 
 class TwitterApi():
     def __init__(self):
         # Obtain all of the required api keys
-        api_object = TwitterApiKey.objects.all()[0]
         self.ApiKey = api_object.key
         self.ApiSecret = api_object.key_secret
         self.ApiAccessToken = api_object.access_token
@@ -38,7 +37,7 @@ class TwitterApi():
 
     # This function downloads all the tweets for a given keyword and saves them under self.tweets
     # By default a limit of 1000 tweets is imposed on the api to make sure that we are not blocked
-    def get_tweets_by_keyword(self, keyword, date=datetime.date.today(), n_tweets=1000):
+    def get_tweets_by_keyword(self, keyword, date, n_tweets=1000):
         until_date = date + datetime.timedelta(1)
         since_date = date - datetime.timedelta(1)
         tweets = tweepy.Cursor(self.api.search, q=keyword, since=since_date, until=until_date).items(n_tweets)
@@ -60,22 +59,50 @@ class TwitterApi():
         self.negative_tweets = 0
         self.positive_tweets = 0
         self.neutral_tweets = 0
-        self.polarity = 0
-        self.n_tweets = len(self.tweets)
+        polarities = []
         for text in self.tweets:
-            # Polarity is a float that lies between [-1,1], -1 indicates negative sentiment and +1 indicates positive sentiments.
-            analysis = TextBlob(text)
-            self.polarity += analysis.sentiment.polarity
-            
-            # Valence aware dictionary for sentiment reasoning (VADER)
-            score = SentimentIntensityAnalyzer().polarity_scores(text)
-            # Find out whether this is a positive or negative tweet
-            if score['neg'] > score['pos']:
-                self.negative_tweets += 1
-            elif score['pos'] < score['neg']:
-                self.positive_tweets += 1
+            sentence = flair.data.Sentence(text)
+            sentiment_model.predict(sentence)
+
+            if sentence.labels[0].value == 'NEGATIVE':
+                score = -sentence.labels[0].score
             else:
+                score = sentence.labels[0].score
+            polarities.append(score)
+            
+            if (score < -0.33):
+                self.negative_tweets += 1
+            elif score < 0.33:
                 self.neutral_tweets += 1
+            else:
+                self.positive_tweets += 1
+        
+        self.polarity = np.average(polarities)
+
+             
+
+    # This function creates a connection to the postgres database and obtains all the stocks 
+    def download_twitter_data_today(self):
+        # First create a connection to the database and execute the query to obtain all the stocks
+        connection = DatabaseConnection()
+        today = datetime.date.today()
+        stocks = connection.execute_select_query('SELECT * FROM stocks_stock;')
+        # Loop through all the stocks and get the corresponding tweets
+        for stock in stocks:
+            # Make the API search for all tick containing either the ticker or the full name [here we should remove Inc, Corp etc]
+            ticker = stock['ticker'].split('-')[0]
+            ticker = ticker.split('.')[0]
+            keyword = '(' + stock.name + ' OR ' + ticker +  ') (lang:en)'
+
+            # Get the tweets and analyse them 
+            get_tweets_by_keyword(ticker, today)
+            analyse_tweets()
+            
+            # And finally send the result back to the database
+            connection.execute_insert_query('INSERT INTO twitterapi.TweetHistory (Stock, date, n_positive, n_negative, n_neutral, polarity) VALUES (%s, %s, %s, %s, %s, %s)' % (stock['id'], today, self.positive_tweets, self.negative_tweets, self.neutral_tweets, self.polarity))
+            print('Succesfully inserted %s into database' % (stock))
+
+       
 
         
 
